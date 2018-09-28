@@ -1,0 +1,69 @@
+1,maven加相应的架包
+ <!-- shardingjdbc  -->
+        <dependency>
+            <groupId>io.shardingjdbc</groupId>
+            <artifactId>sharding-jdbc-spring-boot-starter</artifactId>
+            <version>2.0.0.M3</version>
+        </dependency>
+
+ <!--druid -->
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>druid</artifactId>
+            <version>1.1.10</version>
+        </dependency>
+
+2,配置相应的sharding-jdbc的配置（具体看项目的配置），实现读写分离
+3,实现主从数据库复制数据
+    a: 先配置好主服务器的配置
+    b:启动服务器
+    c: 新建一个远程访问的用户并授予“REPLICATION SLAVE”的权限，不需要再赋予其它的权限。在下面的命令，把X.X.X.X替换为从服务器的IP,password指的是这个账号的密码。
+        mysql>CREATE USER 'user'@ 'X.X.X.X' IDENTIFIED BY 'password';
+        mysql>GRANT REPLICATION SLAVE ON *.* TO 'user'@'X.X.X.X' IDENTIFIED BY 'password';
+
+        REPLICATION SLAVE则是一个必须而基本的权限，它直接授予slave服务器以该账户连接master后可以执行replicate操作的权利。
+
+    d:配置从服务器（端口号跟主数据库要不一样）
+    c:启动从服务器之后执行脚本(每次启动之后动态改变)(最后面的那个日志是在主服务器上执行SHOW MASTER STATUS可以拿到)
+        change master to master_host='127.0.0.1',master_user='mytest',master_password='password',master_port=5506,master_log_file='mysql-bin.000004';
+
+    d:在从服务器执行如下脚本（启动SLAVE进程）
+    START SLAVE
+    STOP SLAVE （停止）
+
+#########################################################################################3
+mysql主从复制，经常会遇到错误而导致slave端复制中断，这个时候一般就需要人工干预，跳过错误才能继续
+跳过错误有两种方式：1.跳过指定数量的事务：
+mysql>slave stop;
+mysql>SET GLOBAL SQL_SLAVE_SKIP_COUNTER = 1        #跳过一个事务
+mysql>slave start2.修改mysql的配置文件，通过slave_skip_errors参数来跳所有错误或指定类型的错误
+vi /etc/my.cnf
+[mysqld]
+#slave-skip-errors=1062,1053,1146 #跳过指定error no类型的错误
+#slave-skip-errors=all #跳过所有错误
+
+额外的一些脚本命令：
+    查看mysql数据库端口：
+    show global variables like 'port';
+    查看当前使用的用户:
+    select user();
+    查看mysql server_id:
+    show variables like 'server_id';
+    怎么判断mysql的主从是否同步？(同步日志)
+    mysql> show slave status\G #查看是否都为yes
+    Slave_IO_Running
+    Slave_SQL_Running
+
+
+流程说明：
+
+MySQL主从复制之前我们需要先启动Master数据库然后再启动Salve数据库，然后在Salve数据库中执行start slave;，执行完成之后，流程就如下了：
+
+Salve的IO线程会读取mastr.info文件中配置好的主库信息，比如说存放的有：Master数据库的用户名、密码、端口、还有Master的binlog索引位置；
+拿到信息之后就带着信息去链接Master的主库IO线程
+当主库的IO线程先检查SLave传过来的配置信息是否正确，如果正确，就拿着Slave传过来的binlog索引位置和Master库的binlog文件中最后一个索引位置进行对比，如果一致就陷入等待状态，等待Master的binlog索引位置更新；
+如果不一致就把Slave传过来的binlog索引位置往后的所有SQL语句包括最后一条SQL语句的索引位置发送个给Slave的IO线程；
+Slave的IO线程拿到信息之后，先把Master传过来的binlog索引在Slave的master.info文件中进行更新；
+然后再把Master传过来的SQL语句写入到relay文件中，然后继续循环执行第二个步骤；
+Slave的SQL线程会一直持续的观察relay日志文件中是否有改动，如果没有就继续监听；
+如果发现relay中有变动，那么就获取变动的内容转换为SQL语句，并且把SQL语句在Salve的数据库中进行执行
